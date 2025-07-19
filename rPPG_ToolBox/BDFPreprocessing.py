@@ -1,3 +1,4 @@
+import chardet
 import mne
 import numpy as np
 import pandas as pd
@@ -6,16 +7,30 @@ import matplotlib.pyplot as plt
 from scipy.signal import butter, filtfilt
 from scipy.signal import find_peaks
 from biosppy.signals import ecg as biosppy_ecg
+import xml.etree.ElementTree as ET
+
 
 class BDFSyncProcessor:
-    def __init__(self, bdf_path):
+    def __init__(self, bdf_path,xml_path):
         self.bdf_path = bdf_path
+        self.xml_path = xml_path
         self.raw = mne.io.read_raw_bdf(bdf_path, preload=True)
+
         self.trigger_channel = None
         self.trigger_time = None
         self.trigger_value = None
 
+    import xml.etree.ElementTree as ET
 
+    def extract_xml_sync_params(self):
+        tree = ET.parse(self.xml_path)
+        root = tree.getroot()
+
+        vid_begin = float(root.attrib['vidBeginSmp'])
+        vid_end = float(root.attrib['vidEndSmp'])
+        vid_rate = float(root.attrib['vidRate'])
+
+        return vid_begin, vid_end, vid_rate
 
     def detect_r_peaks_biosppy(self,ecg_data, fs):
         # biosppy returns a dictionary with R-peak locations in samples
@@ -40,7 +55,7 @@ class BDFSyncProcessor:
         print(f" Trigger channel detected: {self.trigger_channel}")
         return self.trigger_channel
 
-    def extract_trigger_signal(self, save_csv=False):
+    def extract_trigger_signal(self, save_csv=True):
         if self.trigger_channel is None:
             raise RuntimeError("Trigger channel not set. Run find_trigger_channel() first.")
 
@@ -69,51 +84,56 @@ class BDFSyncProcessor:
         print(f" First trigger detected at {self.trigger_time:.3f}s (value = {self.trigger_value})")
         return self.trigger_time
 
-    def extract_middle_ecg_segment(self, full_duration_sec=135.0, segment_length_sec=30.0, save_csv=True):
+    def extract_middle_ecg_segment(self, csv_path=None, segment_length_sec=30.0, save_csv=True):
         """
-        Extracts the middle portion (default 30s) of the full-duration ECG (EXG2) signal.
-        Also prints total ECG duration and extracted segment duration.
-        Scales ECG from volts to microvolts for better R-peak detection.
+        Reads the previously saved synced ECG CSV file, finds the middle 30s segment,
+        and returns time and ECG data for heart rate analysis.
         """
-        if self.trigger_time is None:
-            raise ValueError("Trigger time not set. Run detect_first_trigger_time() first.")
+        if csv_path is None:
+            # Default CSV name based on BDF filename
+            csv_path = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_synced_data.csv"
 
-        fs = self.raw.info['sfreq']
-        total_samples = self.raw.n_times
-        total_duration = total_samples / fs
-        print(f" Total ECG Duration from file: {total_duration:.2f} seconds")
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"Synced CSV file not found: {csv_path}")
 
-        # Calculate middle segment time range
-        mid_offset = full_duration_sec / 2
-        half_segment = segment_length_sec / 2
-        t_start = self.trigger_time + mid_offset - half_segment
-        t_end = self.trigger_time + mid_offset + half_segment
+        # Read the full ECG data
+        df = pd.read_csv(csv_path)
 
-        # Crop and extract ECG data
-        cropped_raw = self.raw.copy().pick(['EXG2']).crop(tmin=t_start, tmax=t_end)
-        ecg_data, times = cropped_raw.get_data(return_times=True)
-        ecg_data = ecg_data[0]
+        # Validate structure
+        if 'Time (s)' not in df.columns or 'EXG2' not in df.columns:
+            raise ValueError("CSV must contain 'Time (s)' and 'EXG2' columns")
 
-        # Convert from volts to microvolts
-        ecg_data = ecg_data * 1e6
+        times = df['Time (s)'].values
+        ecg_data = df['EXG2'].values
 
-        # Segment duration check
-        segment_duration = times[-1] - times[0]
-        print(f" Extracted Middle ECG Segment Duration: {segment_duration:.2f} seconds")
+        full_duration = times[-1] - times[0]
+        print(f" Full Synced ECG Duration: {full_duration:.2f} seconds")
 
-        # Save to CSV if requested
+        # Determine start and end of middle segment
+        mid_point = times[0] + full_duration / 2
+        t_start = mid_point - (segment_length_sec / 2)
+        t_end = mid_point + (segment_length_sec / 2)
+
+        # Mask the segment
+        mask = (times >= t_start) & (times <= t_end)
+        segment_times = times[mask]
+        segment_ecg = ecg_data[mask]
+
+        print(f" Extracted Middle {segment_length_sec}s ECG Segment: Start={t_start:.2f}s, End={t_end:.2f}s")
+
+        # Save segment if required
         if save_csv:
-            df = pd.DataFrame({'Time (s)': times, 'EXG2 (µV)': ecg_data})
-            out_name = os.path.splitext(os.path.basename(self.bdf_path))[
-                           0] + f"_middle_{int(segment_length_sec)}s_ecg.csv"
-            df.to_csv(out_name, index=False)
-            print(f" Middle {segment_length_sec}s ECG saved to: {out_name}")
+            df_segment = pd.DataFrame({'Time (s)': segment_times, 'EXG2 (µV)': segment_ecg})
+            out_name = os.path.splitext(csv_path)[0] + f"_middle_{int(segment_length_sec)}s.csv"
+            df_segment.to_csv(out_name, index=False)
+            print(f" Saved to: {out_name}")
 
-        return times, ecg_data
+        return segment_times, segment_ecg
 
-    def crop_synced_segment(self, duration=133.0, channels=None, save_csv=False):
+    def crop_synced_segment(self, duration, channels=None, save_csv=False):
         if self.trigger_time is None:
             raise RuntimeError("Trigger time not set. Run detect_first_trigger_time() first.")
+
 
         end_time = self.trigger_time + duration
         cropped_raw = self.raw.copy()
@@ -125,20 +145,28 @@ class BDFSyncProcessor:
         data, times = cropped_raw.get_data(return_times=True)
 
         # Save CSV if needed
-        # if save_csv:
-        #     df = pd.DataFrame({'Time (s)': times})
-        #     for i, ch in enumerate(cropped_raw.ch_names):
-        #         df[ch] = data[i]
-        #     out_name = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_synced_data.csv"
-        #     df.to_csv(out_name, index=False)
-        #     print(f" Synced data saved to {out_name}")
+        if save_csv:
+            df = pd.DataFrame({'Time (s)': times})
+            for i, ch in enumerate(cropped_raw.ch_names):
+                df[ch] = data[i]
+            out_name = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_synced_data.csv"
+            df.to_csv(out_name, index=False)
+            print(f" Synced data saved to {out_name}")
 
         return cropped_raw
 
     def plot_ecg_signal(self, times, ecg_data, title="Extracted ECG (EXG2)"):
         """
-        Plots the ECG signal (EXG2) over time.
+        Plots the ECG signal (EXG2) over time and prints time range and duration.
         """
+        start_time = times[0]
+        end_time = times[-1]
+        duration = end_time - start_time
+
+        print(f" Segment Start Time: {start_time:.3f} s")
+        print(f" Segment End Time:   {end_time:.3f} s")
+        print(f"️ Segment Duration:   {duration:.3f} s")
+
         plt.figure(figsize=(12, 4))
         plt.plot(times, ecg_data, linewidth=1.0, color='blue')
         plt.xlabel("Time (s)")
@@ -250,50 +278,30 @@ class BDFSyncProcessor:
         return heart_rates, rr_intervals
 
 
-def robust_r_peak_detection(ecg_data, times):
-    fs = int(1 / (times[1] - times[0]))
 
-    # Detect only high-prominence and well-spaced peaks
-    threshold = np.percentile(ecg_data, 98)
-    peaks, props = find_peaks(ecg_data, distance=fs*0.6, prominence=threshold * 0.3)
-
-    # Calculate heart rate
-    rr_intervals = np.diff(times[peaks])
-    heart_rates = 60 / rr_intervals if len(rr_intervals) > 0 else []
-    avg_hr = np.mean(heart_rates) if heart_rates else 0
+    def calculate_video_duration(self):
+        begin_sample, end_sample, vid_rate = self.extract_xml_sync_params()
+        return (end_sample - begin_sample) / vid_rate
 
 
-    # Plot
-    plt.figure(figsize=(12, 4))
-    plt.plot(times, ecg_data, label='ECG')
-    plt.plot(times[peaks], ecg_data[peaks], 'ro', label='R-peaks')
-    plt.title("📈 Robust R-Peak Detection")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Amplitude")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-    print(f" Cleaned R-peaks: {len(peaks)}")
-    print(f" Refined Avg HR: {avg_hr:.2f} bpm")
-
-    return peaks, heart_rates
 
 # === Example Usage ===
 if __name__ == "__main__":
-    bdf_file = "C:/Users/Hp/Downloads/814/Part_7_S_Trial17_emotion.bdf"
-    processor = BDFSyncProcessor(bdf_file)
+    folderPath = "C:/Users/Hp/Downloads/2618/"
+    bdf_file = os.path.join(folderPath, "Part_21_S_Trial9_emotion.bdf")
+    xml_file = os.path.join(folderPath, "session.xml")
+    processor = BDFSyncProcessor(bdf_file,xml_file)
 
     processor.print_channels()
     processor.find_trigger_channel()
     processor.detect_first_trigger_time()
+    video_duration = processor.calculate_video_duration()
 
     # You can change or add more channels as needed
     channels_to_extract = ['EXG2']
-    processor.crop_synced_segment(duration=133.0, channels=channels_to_extract, save_csv=True)
-    times, ecg_data = processor.extract_middle_ecg_segment(full_duration_sec=135.0, segment_length_sec=30.0,
-                                                           save_csv=False)
+    processor.crop_synced_segment(video_duration, channels=channels_to_extract, save_csv=True)
+    times, ecg_data = processor.extract_middle_ecg_segment( segment_length_sec=30.0,
+                                                           save_csv=True)
 
     # Preprocess ECG
     filtered_ecg = processor.preprocess_ecg(ecg_data, fs=int(1 / (times[1] - times[0])))
