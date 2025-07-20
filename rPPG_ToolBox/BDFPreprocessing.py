@@ -209,6 +209,7 @@ class BDFSyncProcessor:
         except ImportError:
             raise ImportError("Please install BioSPPy with `pip install biosppy`")
 
+        # Step 1: Detect R-peaks
         rpeaks = self.detect_r_peaks_biosppy(ecg_data, fs)
         rpeak_times = times[rpeaks]
 
@@ -216,14 +217,14 @@ class BDFSyncProcessor:
         heart_rates = 60 / rr_intervals if len(rr_intervals) > 0 else []
         avg_hr = np.mean(heart_rates) if len(heart_rates) > 0 else 0
 
-        print(f" Detected {len(rpeaks)} R-peaks using BioSPPy")
-        print(f" Average HR: {avg_hr:.2f} bpm")
+        print(f"✅ Detected {len(rpeaks)} R-peaks using BioSPPy")
+        print(f"🫀 Average Heart Rate: {avg_hr:.2f} bpm")
 
+        # Step 2: Plot ECG and peaks
         if plot_peaks:
             plt.figure(figsize=(12, 4))
             plt.plot(times, ecg_data, label='ECG')
             plt.plot(rpeak_times, ecg_data[rpeaks], 'ro', label='R-peaks')
-            plt.title("R-Peak Detection (BioSPPy)")
             plt.xlabel("Time (s)")
             plt.ylabel("Amplitude")
             plt.grid(True)
@@ -231,53 +232,61 @@ class BDFSyncProcessor:
             plt.tight_layout()
             plt.show()
 
-        # Plot RR intervals
+        # Step 3: Plot RR intervals
         plt.figure(figsize=(8, 3))
         plt.plot(rr_intervals, marker='o')
-        plt.title("RR Intervals Over Time")
         plt.xlabel("Interval Index")
         plt.ylabel("RR Interval (s)")
         plt.grid(True)
         plt.tight_layout()
         plt.show()
 
-        # Save RR intervals (optional)
-        rr_df = pd.DataFrame({'RR Interval (s)': rr_intervals})
+        # Step 4: Save RR intervals (optional)
         rr_out_path = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_rr_intervals.csv"
-        # rr_df.to_csv(rr_out_path, index=False)
+        rr_df = pd.DataFrame({'RR Interval (s)': rr_intervals})
+        # rr_df.to_csv(rr_out_path, index=False)  # uncomment if saving needed
         print(f"📄 RR intervals saved to: {rr_out_path}")
 
-        # Interpolation only if enough peaks to compute HR
-        if len(heart_rates) > 0:
-            # Heart rate timestamps (midpoints between R-peaks)
+        # Step 5: Interpolate Heart Rate for 30 Hz sync (exactly 900 samples)
+        frame_interval = 1.0 / 30.0
+        start_time = round(times[0], 3)
+        frame_times_synced = np.arange(start_time, start_time + 900 * frame_interval, frame_interval)
+
+        csv_30hz = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_hr_30hz.csv"
+
+        if len(heart_rates) >= 1:
             hr_times = (rpeak_times[:-1] + rpeak_times[1:]) / 2
-
-            # Interpolate at 30 Hz using same logic as video frame extraction
-            frame_interval = 1.0 / 30.0
-            start_sec = int(np.ceil(times[0]))
-            end_time = times[-1] - 1e-6  # avoid floating overshoot
-
-            frame_time = start_sec
-            frame_times_synced = []
-            interpolated_hr_synced = []
-
-            while frame_time <= end_time:
-                hr = np.interp(frame_time, hr_times, heart_rates)
-                frame_times_synced.append(round(frame_time, 6))  # to match your filename index logic
-                interpolated_hr_synced.append(hr)
-                frame_time += frame_interval
+            interpolated_hr = np.interp(frame_times_synced, hr_times, heart_rates, left=np.nan, right=np.nan)
+            interpolated_hr = pd.Series(interpolated_hr).ffill().bfill().tolist()[:900]
 
             df_30hz = pd.DataFrame({
                 'Time (s)': frame_times_synced,
-                'Heart Rate (bpm)': interpolated_hr_synced
+                'Heart Rate (bpm)': interpolated_hr
             })
-            csv_30hz = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_hr_30hz.csv"
-            df_30hz.to_csv(csv_30hz, index=False)
-            print(f" Frame-aligned heart rate (30 Hz) saved to: {csv_30hz}")
+            df_30hz.to_csv(csv_30hz, index=False, header=False)
+            print(f"✅ Frame-aligned heart rate (30 Hz) saved to: {csv_30hz}")
+
+            # Plot HR
+            plt.figure(figsize=(12, 4))
+            plt.plot(frame_times_synced, interpolated_hr, color='green', linewidth=1.2)
+            plt.xlabel("Time (s)")
+            plt.ylabel("Heart Rate (bpm)")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.show()
+
+            if np.isnan(interpolated_hr).any():
+                print("⚠️ Warning: Some HR values were padded due to missing R-peak intervals.")
+        else:
+            print("❌ Not enough R-peaks detected for HR interpolation.")
+            df_30hz = pd.DataFrame({
+                'Time (s)': frame_times_synced,
+                'Heart Rate (bpm)': [np.nan] * 900
+            })
+            df_30hz.to_csv(csv_30hz, index=False, header=False)
+            print(f"⚠️ Saved flat HR (NaNs) to preserve sync: {csv_30hz}")
 
         return heart_rates, rr_intervals
-
-
 
     def calculate_video_duration(self):
         begin_sample, end_sample, vid_rate = self.extract_xml_sync_params()
