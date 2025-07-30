@@ -19,9 +19,10 @@ class BDFSyncProcessor:
         self.trigger_channel = None
         self.trigger_time = None
         self.trigger_value = None
+        self.parent_path = os.path.dirname(self.bdf_path)
 
     import xml.etree.ElementTree as ET
-
+        
     def extract_xml_sync_params(self):
         tree = ET.parse(self.xml_path)
         root = tree.getroot()
@@ -64,7 +65,7 @@ class BDFSyncProcessor:
 
         if save_csv:
             df = pd.DataFrame({'Time (s)': times, 'Trigger': trigger_data})
-            out_path = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_trigger_signal.csv"
+            out_path = os.path.join(self.parent_path, os.path.splitext(os.path.basename(self.bdf_path))[0] + "_trigger_signal.csv")
             df.to_csv(out_path, index=False)
             print(f" Trigger signal saved to {out_path}")
 
@@ -91,7 +92,7 @@ class BDFSyncProcessor:
         """
         if csv_path is None:
             # Default CSV name based on BDF filename
-            csv_path = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_synced_data.csv"
+            csv_path = os.path.join(self.parent_path, os.path.splitext(os.path.basename(self.bdf_path))[0] + "_synced_data.csv")
 
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"Synced CSV file not found: {csv_path}")
@@ -124,13 +125,13 @@ class BDFSyncProcessor:
         # Save segment if required
         if save_csv:
             df_segment = pd.DataFrame({'Time (s)': segment_times, 'EXG2 (µV)': segment_ecg})
-            out_name = os.path.splitext(csv_path)[0] + f"_middle_{int(segment_length_sec)}s.csv"
+            out_name = os.path.join(self.parent_path, os.path.splitext(csv_path)[0] + f"_middle_{int(segment_length_sec)}s.csv")
             df_segment.to_csv(out_name, index=False)
             print(f" Saved to: {out_name}")
 
         return segment_times, segment_ecg
 
-    def crop_synced_segment(self, duration, channels=None, save_csv=False):
+    def crop_synced_segment(self, duration, channels=None, save_csv=True):
         if self.trigger_time is None:
             raise RuntimeError("Trigger time not set. Run detect_first_trigger_time() first.")
 
@@ -149,7 +150,8 @@ class BDFSyncProcessor:
             df = pd.DataFrame({'Time (s)': times})
             for i, ch in enumerate(cropped_raw.ch_names):
                 df[ch] = data[i]
-            out_name = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_synced_data.csv"
+                
+            out_name = os.path.join(self.parent_path, os.path.splitext(os.path.basename(self.bdf_path))[0] + "_synced_data.csv")
             df.to_csv(out_name, index=False)
             print(f" Synced data saved to {out_name}")
 
@@ -174,7 +176,7 @@ class BDFSyncProcessor:
         plt.title(title)
         plt.grid(True)
         plt.tight_layout()
-        plt.show()
+        # plt.show()
 
     def preprocess_ecg(self, ecg_data, fs=256, lowcut=0.5, highcut=40.0):
         """
@@ -217,8 +219,8 @@ class BDFSyncProcessor:
         heart_rates = 60 / rr_intervals if len(rr_intervals) > 0 else []
         avg_hr = np.mean(heart_rates) if len(heart_rates) > 0 else 0
 
-        print(f"✅ Detected {len(rpeaks)} R-peaks using BioSPPy")
-        print(f"🫀 Average Heart Rate: {avg_hr:.2f} bpm")
+        print(f"Detected {len(rpeaks)} R-peaks using BioSPPy")
+        print(f"Average Heart Rate: {avg_hr:.2f} bpm")
 
         # Step 2: Plot ECG and peaks
         if plot_peaks:
@@ -230,7 +232,7 @@ class BDFSyncProcessor:
             plt.grid(True)
             plt.legend()
             plt.tight_layout()
-            plt.show()
+            # plt.show()
 
         # Step 3: Plot RR intervals
         plt.figure(figsize=(8, 3))
@@ -239,20 +241,20 @@ class BDFSyncProcessor:
         plt.ylabel("RR Interval (s)")
         plt.grid(True)
         plt.tight_layout()
-        plt.show()
+        # plt.show()
 
         # Step 4: Save RR intervals (optional)
-        rr_out_path = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_rr_intervals.csv"
+        rr_out_path = os.path.join(self.parent_path, os.path.splitext(os.path.basename(self.bdf_path))[0] + "_rr_intervals.csv")
         rr_df = pd.DataFrame({'RR Interval (s)': rr_intervals})
         # rr_df.to_csv(rr_out_path, index=False)  # uncomment if saving needed
-        print(f"📄 RR intervals saved to: {rr_out_path}")
+        print(f"RR intervals saved to: {rr_out_path}")
 
         # Step 5: Interpolate Heart Rate for 30 Hz sync (exactly 900 samples)
         frame_interval = 1.0 / 30.0
         start_time = round(times[0], 3)
-        frame_times_synced = np.arange(start_time, start_time + 900 * frame_interval, frame_interval)
+        frame_times_synced = np.linspace(start_time, start_time + (899 * frame_interval), 900)
 
-        csv_30hz = os.path.splitext(os.path.basename(self.bdf_path))[0] + "_hr_30hz.csv"
+        csv_30hz = os.path.join(self.parent_path, os.path.splitext(os.path.basename(self.bdf_path))[0] + "_hr_30hz.csv")
 
         if len(heart_rates) >= 1:
             hr_times = (rpeak_times[:-1] + rpeak_times[1:]) / 2
@@ -264,7 +266,7 @@ class BDFSyncProcessor:
                 'Heart Rate (bpm)': interpolated_hr
             })
             df_30hz.to_csv(csv_30hz, index=False, header=False)
-            print(f"✅ Frame-aligned heart rate (30 Hz) saved to: {csv_30hz}")
+            print(f"Frame-aligned heart rate (30 Hz) saved to: {csv_30hz}")
 
             # Plot HR
             plt.figure(figsize=(12, 4))
@@ -273,18 +275,18 @@ class BDFSyncProcessor:
             plt.ylabel("Heart Rate (bpm)")
             plt.grid(True)
             plt.tight_layout()
-            plt.show()
+            # plt.show()
 
             if np.isnan(interpolated_hr).any():
-                print("⚠️ Warning: Some HR values were padded due to missing R-peak intervals.")
+                print("Warning: Some HR values were padded due to missing R-peak intervals.")
         else:
-            print("❌ Not enough R-peaks detected for HR interpolation.")
+            print("Not enough R-peaks detected for HR interpolation.")
             df_30hz = pd.DataFrame({
                 'Time (s)': frame_times_synced,
                 'Heart Rate (bpm)': [np.nan] * 900
             })
             df_30hz.to_csv(csv_30hz, index=False, header=False)
-            print(f"⚠️ Saved flat HR (NaNs) to preserve sync: {csv_30hz}")
+            print(f"Saved flat HR (NaNs) to preserve sync: {csv_30hz}")
 
         return heart_rates, rr_intervals
 
@@ -294,27 +296,84 @@ class BDFSyncProcessor:
 
 
 
-# === Example Usage ===
+# # === Example Usage ===
+# if __name__ == "__main__":
+#     folderPath = "/Users/mzeeshan/Documents/PythonProjects/NewRppg/train/1068"
+#     bdf_file = os.path.join(folderPath, "Part_9_S_Trial14_emotion.bdf")
+#     xml_file = os.path.join(folderPath, "session.xml")
+import shutil
+
+def iterate_through(base_dir, save_csv=True):
+    valid_bdf_files = []
+    failed_sessions = []
+
+    for folder in sorted(os.listdir(base_dir)):
+        session_path = os.path.join(base_dir, folder)
+        if not os.path.isdir(session_path):
+            continue
+
+        try:
+            bdf_file = None
+            for file in os.listdir(session_path):
+                if file.endswith(".bdf"):
+                    bdf_file = os.path.join(session_path, file)
+                    break
+
+            if bdf_file is None:
+                raise FileNotFoundError("No .bdf file found in session.")
+
+            xml_file = os.path.join(session_path, "session.xml")
+            if not os.path.exists(xml_file):
+                raise FileNotFoundError("session.xml not found.")
+
+            print(f"\n✅ Processing: {bdf_file}")
+            processor = BDFSyncProcessor(bdf_file, xml_file)
+
+            processor.print_channels()
+            processor.find_trigger_channel()
+            processor.extract_trigger_signal(save_csv=save_csv)
+            processor.detect_first_trigger_time()
+
+            video_duration = processor.calculate_video_duration()
+            channels = ['EXG2']
+
+            processor.crop_synced_segment(video_duration, channels=channels, save_csv=save_csv)
+            times, ecg_data = processor.extract_middle_ecg_segment(segment_length_sec=30.0, save_csv=save_csv)
+
+            filtered_ecg = processor.preprocess_ecg(ecg_data, fs=int(1 / (times[1] - times[0])))
+            processor.plot_ecg_signal(times, filtered_ecg, title="Filtered Middle 30s ECG (EXG2)")
+
+            processor.estimate_heart_rate(times, filtered_ecg, plot_peaks=True)
+
+            valid_bdf_files.append({"session": session_path, "status": "success"})
+
+        except Exception as e:
+            print(f"\n❌ Error in session '{session_path}': {e}\n")
+            failed_sessions.append({"session": session_path, "error": str(e)})
+
+    # 🧾 Generate reports
+    report_dir = os.path.join(base_dir, "reports")
+    os.makedirs(report_dir, exist_ok=True)
+
+    if valid_bdf_files:
+        success_df = pd.DataFrame(valid_bdf_files)
+        success_csv = os.path.join(report_dir, "bdf_success_report.csv")
+        success_df.to_csv(success_csv, index=False)
+        print(f"\n✅ Success report saved to: {success_csv}")
+
+    if failed_sessions:
+        error_df = pd.DataFrame(failed_sessions)
+        error_csv = os.path.join(report_dir, "bdf_error_report.csv")
+        error_df.to_csv(error_csv, index=False)
+        print(f"❌ Error report saved to: {error_csv}")
+
+    return valid_bdf_files
+
+
+
+
+
 if __name__ == "__main__":
-    folderPath = "C:/Users/Hp/Downloads/2474/"
-    bdf_file = os.path.join(folderPath, "Part_20_S_Trial2_emotion.bdf")
-    xml_file = os.path.join(folderPath, "session.xml")
-    processor = BDFSyncProcessor(bdf_file,xml_file)
-
-    processor.print_channels()
-    processor.find_trigger_channel()
-    processor.detect_first_trigger_time()
-    video_duration = processor.calculate_video_duration()
-
-    # You can change or add more channels as needed
-    channels_to_extract = ['EXG2']
-    processor.crop_synced_segment(video_duration, channels=channels_to_extract, save_csv=True)
-    times, ecg_data = processor.extract_middle_ecg_segment( segment_length_sec=30.0,
-                                                           save_csv=True)
-
-    # Preprocess ECG
-    filtered_ecg = processor.preprocess_ecg(ecg_data, fs=int(1 / (times[1] - times[0])))
-    processor.plot_ecg_signal(times, filtered_ecg, title="Filtered Middle 30s ECG (EXG2)")
-
-    # Heart rate estimation
-    processor.estimate_heart_rate(times, filtered_ecg, plot_peaks=True)
+    # os.path.join(self.parent_path, os.path.splitext(os.path.basename(self.bdf_path))[0]
+    folderPath = "C:/Users/Hp/Downloads/MAHNOB_HCI_1.0/Threat_Detection/train"
+    iterate_through(folderPath)
